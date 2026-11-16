@@ -3,7 +3,7 @@ import bpy
 
 
 def hide_relationship_lines():
-    for screen in bpy.data.screens:
+    for screen in getattr(bpy.data, 'screens', ()):
         for area in screen.areas:
             if area.type == 'VIEW_3D':
                 for space in area.spaces:

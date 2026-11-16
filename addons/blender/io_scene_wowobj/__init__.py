@@ -21,7 +21,7 @@
 bl_info = {
     'name': 'Import WoW OBJ files with doodads',
     'author': 'Marlamin, Kruithne',
-    'version': (0, 3, 22),
+    'version': (0, 3, 23),
     'blender': (5, 0, 0),
     'location': 'File > Import-Export > Import WoW Object (.obj)',
     'description': 'Import OBJ files exported by wow.export with WMOs and doodads',
@@ -362,7 +362,6 @@ classes = (
 
 def register():
     from .view_settings import hide_relationship_lines
-    hide_relationship_lines()
     from bpy.utils import register_class
     for cls in classes:
         register_class(cls)
@@ -373,9 +372,15 @@ def register():
     if os.path.exists(logo_path):
         pcoll.load('logo', logo_path, 'IMAGE')
     preview_collections['main'] = pcoll
+    # Startup registration uses _RestrictData: screen access must wait until
+    # Blender has finished enabling addons and restored its normal context.
+    bpy.app.timers.register(hide_relationship_lines, first_interval=0.1)
 
 
 def unregister():
+    from .view_settings import hide_relationship_lines
+    if bpy.app.timers.is_registered(hide_relationship_lines):
+        bpy.app.timers.unregister(hide_relationship_lines)
     from bpy.utils import unregister_class
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     for cls in reversed(classes):

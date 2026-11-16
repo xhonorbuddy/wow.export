@@ -1,9 +1,10 @@
-RELEASE 0.3.22 — Blender 5.0+:
+RELEASE 0.3.23 — Blender 5.0+:
 Download the versioned addon ZIP from https://github.com/xhonorbuddy/wow.export/releases
 Blender: Edit -> Preferences -> Add-ons -> menu -> Install from Disk.
 Choose the ZIP, enable "Import WoW OBJ files with doodads", then restart Blender.
 This release includes all navigation modules and the optional Windows x64 parser.
 Console logging failures no longer interrupt geometry imports.
+Startup registration defers viewport changes so File -> Import registers normally.
 
 AUTOMATIC INSTALLATION:
 1. Open wow.export
