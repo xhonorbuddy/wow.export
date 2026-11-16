@@ -58,7 +58,7 @@ module.exports = {
 	template: `
 		<div id="blender-info">
 			<div id="blender-info-header">
-				<h1>Installing the wow.export Add-on for Blender 2.8+</h1>
+				<h1>Installing the wow.export Add-on for Blender 5.0+</h1>
 				<p>Blender users can make use of our special importer add-on which makes importing advanced objects as simple as a single click. WMO objects are imported with any exported doodad sets included. ADT map tiles are imported complete with all WMOs and doodads positioned as they would be in-game.</p>
 			</div>
 			<div id="blender-info-buttons">
@@ -115,7 +115,7 @@ module.exports = {
 					core.setToast('success', 'The latest add-on version has been installed! (You will need to restart Blender)');
 				else {
 					log.write('No valid Blender installation found, add-on install failed.');
-					core.setToast('error', 'Sorry, a valid Blender 2.8+ installation was not be detected on your system.', null, -1);
+					core.setToast('error', 'No Blender 5.0+ configuration was found. Start Blender once, then retry, or install the bundled add-on ZIP manually.', null, -1);
 				}
 			} catch (e) {
 				log.write('Installation failed due to exception: %s', e.message);

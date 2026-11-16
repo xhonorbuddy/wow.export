@@ -7,8 +7,10 @@ import path from 'node:path';
 import util from 'node:util';
 import zlib from 'node:zlib';
 import fs from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
 import manifest from './package.json';
 import AdmZip from 'adm-zip';
+import crypto from 'node:crypto';
 
 const BUILD_DIR = path.join(__dirname, 'bin');
 const PUBLISH_DIR = path.join(__dirname, 'publish');
@@ -25,12 +27,15 @@ const INSTALLER_NAMES = {
 	'osx-arm64': 'installer'
 };
 
-async function collect_files(dir, out = []) {
+async function collect_files(dir, out = [], root = dir) {
 	const entries = await fs.readdir(dir, { withFileTypes: true });
 	for (const entry of entries) {
 		const entry_path = path.join(dir, entry.name);
+		const relative = path.relative(root, entry_path).replace(/\\/g, '/');
+		if (relative === 'update' || relative === 'update.json')
+			continue;
 		if (entry.isDirectory())
-			await collect_files(entry_path, out);
+			await collect_files(entry_path, out, root);
 		else
 			out.push(entry_path);
 	}
@@ -58,6 +63,7 @@ async function create_data_pak(build_dir, output_dir) {
 		await fs.appendFile(pak_path, compressed);
 
 		contents[relative] = {
+			hash: crypto.createHash('sha256').update(data).digest('hex'),
 			size: data.byteLength,
 			permissions: permissions,
 			compSize: compressed.byteLength,
@@ -77,7 +83,11 @@ async function create_data_pak(build_dir, output_dir) {
 async function create_archive(source_dir, archive_path, is_windows) {
 	if (is_windows) {
 		const zip = new AdmZip();
-		zip.addLocalFolder(source_dir);
+		for (const file of await collect_files(source_dir)) {
+			const relative = path.relative(source_dir, file).replace(/\\/g, '/');
+			const directory = path.posix.dirname(relative);
+			zip.addLocalFile(file, directory === '.' ? '' : directory);
+		}
 		zip.writeZip(archive_path);
 	} else {
 		const proc = Bun.spawn({
@@ -85,6 +95,8 @@ async function create_archive(source_dir, archive_path, is_windows) {
 				'tar',
 				'-czf',
 				archive_path,
+				'--exclude=./update',
+				'--exclude=./update.json',
 				'-C',
 				source_dir,
 				'.'
@@ -112,9 +124,9 @@ for (const build_tag of PUBLISH_BUILDS) {
 		const pub_dir = path.join(PUBLISH_DIR, build_tag);
 		await fs.mkdir(pub_dir, { recursive: true });
 
-		// move update files (unchanged from original)
-		await fs.rename(update_file_path, path.join(pub_dir, 'update'));
-		await fs.rename(update_manifest_path, path.join(pub_dir, 'update.json'));
+		// Preserve build outputs so packaging can be repeated.
+		await fs.copyFile(update_file_path, path.join(pub_dir, 'update'));
+		await fs.copyFile(update_manifest_path, path.join(pub_dir, 'update.json'));
 
 		// create portable archive (raw program files)
 		const portable_archive_name = util.format('portable-wow-export-%s-%s%s', build_tag, manifest.version, archive_ext);
@@ -147,11 +159,27 @@ for (const build_tag of PUBLISH_BUILDS) {
 		await create_archive(staging_dir, installer_archive_path, is_windows);
 		console.log('  Created: %s', installer_archive_name);
 
+		// Standalone downloads for users who already have Blender or the app.
+		await fs.copyFile(path.join(__dirname, 'addons/blender/io_scene_wowobj.zip'),
+			path.join(pub_dir, 'io_scene_wowobj.zip'));
+		await fs.copyFile(path.join(__dirname, 'docs/build-and-use.html'),
+			path.join(pub_dir, 'wow-export-guide.html'));
+
 		// cleanup staging directory
 		await fs.rm(staging_dir, { recursive: true, force: true });
+
+		const checksums = [];
+		for (const entry of (await fs.readdir(pub_dir, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+			if (!entry.isFile() || entry.name === 'SHA256SUMS.txt') continue;
+			const hash = crypto.createHash('sha256');
+			for await (const chunk of createReadStream(path.join(pub_dir, entry.name))) hash.update(chunk);
+			checksums.push(`${hash.digest('hex')}  ${entry.name}`);
+		}
+		await fs.writeFile(path.join(pub_dir, 'SHA256SUMS.txt'), checksums.join('\n') + '\n');
 
 		console.log(`successfully published build ${build_tag}`);
 	} catch (e) {
 		console.error(`failed to publish build ${build_tag}: ${e.message}`);
+		process.exitCode = 1;
 	}
 }

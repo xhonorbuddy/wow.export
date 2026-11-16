@@ -1,3 +1,6 @@
+from .diagnostics import log as print
+
+
 def process_texture_transform(transform_data):
     """Convert M2Track data to animation rates"""
     result = {

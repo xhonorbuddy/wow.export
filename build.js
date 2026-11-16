@@ -108,6 +108,15 @@ const deflateBuffer = util.promisify(zlib.deflate);
 	const allBuildsStart = Date.now();
 	log.info('Selected builds: %s', log_colour_array(targetBuilds));
 
+	// Keep the manual-install ZIP in sync with the addon bundled in the release.
+	const addonDirectory = path.resolve('addons/blender/io_scene_wowobj');
+	const addonArchive = new AdmZip();
+	for (const entry of await fs.readdir(addonDirectory, { withFileTypes: true })) {
+		if (entry.isFile() && /\.(py|png|txt|dll)$/i.test(entry.name))
+			addonArchive.addLocalFile(path.join(addonDirectory, entry.name), 'io_scene_wowobj');
+	}
+	await addonArchive.writeZipPromise(path.resolve('addons/blender/io_scene_wowobj.zip'));
+
 	let last_addon_arch = null;
 
 	for (const build of targetBuilds) {

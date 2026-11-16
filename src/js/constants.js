@@ -63,7 +63,7 @@ module.exports = {
 		ADDON_DIR: path.join('scripts', 'addons', 'io_scene_wowobj'), // Install path for add-ons
 		LOCAL_DIR: path.join(INSTALL_PATH, 'addon', 'io_scene_wowobj'), // Local copy of our Blender add-on.
 		ADDON_ENTRY: '__init__.py', // Add-on entry point that contains the version.
-		MIN_VER: 2.8 // Minimum version supported by our add-on.
+		MIN_VER: 5.0 // Matches the Blender addon's bl_info requirement.
 	},
 
 	// Defines game-specific constants.

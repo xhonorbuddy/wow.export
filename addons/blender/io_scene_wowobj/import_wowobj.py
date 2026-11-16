@@ -13,6 +13,7 @@ from math import radians
 from mathutils import Quaternion
 from .animation_processor import process_texture_transform
 from .import_names import new_object, new_mesh
+from .diagnostics import log as print
 
 IS_B40 = bpy.app.version >= (4, 0, 0)
 

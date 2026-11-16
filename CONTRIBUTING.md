@@ -21,11 +21,8 @@ The developers maintain a [public roadmap](https://github.com/users/Kruithne/pro
 ### Prerequisites
 - **Bun** 1.2 or above (required)
 - **Node.js** v24.9.0 or above (required for native add-ons)
-- **Python 2.7.18** (required for node-gyp)
-  - Windows: Install via `choco install python2 -y`
-  - macOS: Install via pyenv: `pyenv install 2.7.18`
-  - Linux: Install via apt: `sudo apt install python2 python2-dev`
-- **nw-gyp** (required for building native add-ons): `npm install -g nw-gyp@latest`
+- **Python 3** (required for node-gyp; this checkout was built with Python 3.13)
+- **node-gyp** (required for building native add-ons): `npm install -g node-gyp@latest`
 - **Build tools** (platform-specific):
   - Windows: Visual Studio Build Tools with C++ support
   - Linux: `build-essential` package (`sudo apt-get install build-essential`)
