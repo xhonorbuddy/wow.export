@@ -21,7 +21,7 @@
 bl_info = {
     'name': 'Import WoW OBJ files with doodads',
     'author': 'Marlamin, Kruithne',
-    'version': (0, 3, 21),
+    'version': (0, 3, 22),
     'blender': (5, 0, 0),
     'location': 'File > Import-Export > Import WoW Object (.obj)',
     'description': 'Import OBJ files exported by wow.export with WMOs and doodads',

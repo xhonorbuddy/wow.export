@@ -6,6 +6,8 @@ on:
       - '*'
 jobs: 
   build:
+    # Standalone Blender addon releases are packaged and uploaded separately.
+    if: ${{ !startsWith(github.ref, 'refs/tags/addon-') }}
     name: Build and publish
     strategy:
       matrix:

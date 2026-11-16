@@ -2,6 +2,16 @@
 
 # wow.export
 
+## Blender importer release
+
+Download the installable addon ZIP from [GitHub Releases](https://github.com/xhonorbuddy/wow.export/releases).
+Requires Blender 5.0+. Use **Edit > Preferences > Add-ons > Install from Disk**,
+select the ZIP, enable **Import WoW OBJ files with doodads**, and restart Blender.
+The repository's **Source code (zip)** download is not the addon installation ZIP.
+
+To package the importer independently, run `bun build/package-blender-addon.js`.
+It writes a clean versioned ZIP and SHA-256 checksum to `publish/blender-addon/`.
+
 wow.export is the number one export toolkit for World of Warcraft, providing tools for extracting and converting files from the game client or public CDN servers.
 
 ## Main Features
