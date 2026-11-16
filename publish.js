@@ -162,8 +162,6 @@ for (const build_tag of PUBLISH_BUILDS) {
 		// Standalone downloads for users who already have Blender or the app.
 		await fs.copyFile(path.join(__dirname, 'addons/blender/io_scene_wowobj.zip'),
 			path.join(pub_dir, 'io_scene_wowobj.zip'));
-		await fs.copyFile(path.join(__dirname, 'docs/build-and-use.html'),
-			path.join(pub_dir, 'wow-export-guide.html'));
 
 		// cleanup staging directory
 		await fs.rm(staging_dir, { recursive: true, force: true });

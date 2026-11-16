@@ -2,10 +2,6 @@
 
 # wow.export
 
-For this customized build, open the illustrated [Build & Use Guide](docs/build-and-use.html)
-in a browser. It covers Windows builds, release downloads, Blender installation,
-terrain import, and navigation geometry export.
-
 wow.export is the number one export toolkit for World of Warcraft, providing tools for extracting and converting files from the game client or public CDN servers.
 
 ## Main Features
