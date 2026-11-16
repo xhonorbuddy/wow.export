@@ -591,7 +591,8 @@ const deflateBuffer = util.promisify(zlib.deflate);
 		Object.assign(manifest, config.manifest);
 
 		// Apply build specific meta data to the manifest.
-		Object.assign(manifest, { flavour: build.name, guid: buildGUID });
+		const flavour = argv.includes('--local') ? `${build.name}-local` : build.name;
+		Object.assign(manifest, { flavour, guid: buildGUID });
 
 		const manifestPath = path.resolve(path.join(buildDir, build.manifestTarget));
 		await fs.writeFile(manifestPath, JSON.stringify(manifest, null, '\t'));
@@ -648,6 +649,14 @@ const deflateBuffer = util.promisify(zlib.deflate);
 			const manifestData = { contents, guid: buildGUID }
 			const manifestOut = path.join(buildDir, build.updateBundle.manifest);
 			await fs.writeFile(manifestOut, JSON.stringify(manifestData, null, '\t'), 'utf8');
+
+			// Keep the installer payload beside installer.exe using its expected names.
+			if (build.installer) {
+				const installerDir = path.join(outDir, build.name + '-installer');
+				await fs.copyFile(bundleOut, path.join(installerDir, 'data.pak'));
+				await fs.copyFile(manifestOut, path.join(installerDir, 'data.pak.json'));
+			}
+
 			log.info('Update package built (*%s* (*%s* deflated) in *%d* files)', format_bytes(totalSize), format_bytes(compSize), entryCount);
 		}
 

@@ -1,0 +1,39 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "windows-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "architecture": { "value": "x64", "strategy": "external" },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "cacheVariables": { "WOW_EXPORT_NATIVE_GEOMETRY": true },
+      "vendor": {
+        "microsoft.com/VisualStudioSettings/CMake/1.0": {
+          "hostOS": [ "Windows" ],
+          "intelliSenseMode": "windows-msvc-x64"
+        }
+      }
+    },
+    {
+      "name": "x64-debug",
+      "displayName": "Windows x64 Debug",
+      "inherits": "windows-base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "WOW_EXPORT_APP_BUILD": "win-x64-debug" }
+    },
+    {
+      "name": "x64-release",
+      "displayName": "Windows x64 Release",
+      "inherits": "windows-base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "WOW_EXPORT_APP_BUILD": "win-x64" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "native-debug", "configurePreset": "x64-debug", "targets": [ "native_geometry" ] },
+    { "name": "native-release", "configurePreset": "x64-release", "targets": [ "native_geometry" ] },
+    { "name": "app-debug", "configurePreset": "x64-debug", "targets": [ "wow_export_app" ] },
+    { "name": "app-release", "configurePreset": "x64-release", "targets": [ "wow_export_app" ] }
+  ]
+}

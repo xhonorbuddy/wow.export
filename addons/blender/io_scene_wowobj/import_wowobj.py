@@ -4,11 +4,15 @@ import os
 import csv
 import hashlib
 import json
+from array import array
+from itertools import chain
+from math import isfinite
 from collections import defaultdict
 
 from math import radians
 from mathutils import Quaternion
 from .animation_processor import process_texture_transform
+from .import_names import new_object, new_mesh
 
 IS_B40 = bpy.app.version >= (4, 0, 0)
 
@@ -30,7 +34,7 @@ def importWoWOBJAddon(objectFile, settings):
             print('[WoWOBJ] Cleared stale importedModelIDs cache at start of ADT import session.')
         settings._import_cache_cleared = True
 
-    importWoWOBJ(objectFile, None, settings)
+    return importWoWOBJ(objectFile, None, settings)
 
 def _new_placement_stats(tileName):
     return {
@@ -1028,6 +1032,11 @@ def createLiquidMaterial(materialName, liquidType):
 
 
 def importLiquidChunks(liquidFile, baseObj, settings):
+    for _ in _iter_liquids(liquidFile, baseObj, settings):
+        pass
+
+
+def _iter_liquids(liquidFile, baseObj, settings):
     print(f'Attempting to import liquid from: {liquidFile}')
     
     try:
@@ -1041,14 +1050,21 @@ def importLiquidChunks(liquidFile, baseObj, settings):
     if 'liquidChunks' not in liquid_data:
         print('No liquidChunks found in JSON data')
         return
+
+    if getattr(settings, 'navigationOnly', False):
+        from .navigation_liquids import import_liquids
+        yield from import_liquids(liquid_data, baseObj, settings)
+        return
     
-    liquidparent = bpy.data.objects.new('Liquids', None)
+    liquidparent = new_object(settings, 'Liquids', None)
     liquidparent.parent = baseObj
     liquidparent.name = 'Liquids'
     liquidparent.rotation_euler = [0, 0, 0]
     liquidparent.rotation_euler.x = radians(-90)
     
-    collection = bpy.context.view_layer.active_layer_collection.collection.objects
+    collection = getattr(settings, '_collection', None)
+    if collection is None:
+        collection = bpy.context.view_layer.active_layer_collection.collection.objects
     collection.link(liquidparent)
     
     liquidChunks = liquid_data['liquidChunks']
@@ -1057,6 +1073,7 @@ def importLiquidChunks(liquidFile, baseObj, settings):
     liquid_objects_created = 0
     
     for chunk_idx, chunk in enumerate(liquidChunks):
+        yield
         if not chunk or chunk is None:
             continue
             
@@ -1097,8 +1114,8 @@ def importLiquidChunks(liquidFile, baseObj, settings):
                 continue
             
             mesh_name = f'Liquid_Chunk_{chunk_x:02d}_{chunk_y:02d}_{instance_idx}'
-            mesh = bpy.data.meshes.new(mesh_name)
-            liquid_obj = bpy.data.objects.new(mesh_name, mesh)
+            mesh = new_mesh(settings, mesh_name)
+            liquid_obj = new_object(settings, mesh_name, mesh)
             
             liquid_obj.parent = liquidparent
             collection.link(liquid_obj)
@@ -1164,7 +1181,7 @@ def importLiquidChunks(liquidFile, baseObj, settings):
                             v3 = vertices[(y + 1) * (width + 1) + (x + 1)]
                             v4 = vertices[(y + 1) * (width + 1) + x]
                             
-                            face = bm.faces.new([v1, v2, v3, v4])
+                            face = bm.faces.new([v1, v4, v3, v2])
                             face.smooth = True
                             faces_created += 1
                         except ValueError as e:
@@ -1186,6 +1203,8 @@ def importLiquidChunks(liquidFile, baseObj, settings):
                     
                     liquid_obj.data.materials.append(material)
                 
+                liquid_obj['wow_nav_area'] = {3: 'magma', 4: 'slime'}.get(liquid_type, 'water')
+                liquid_obj['wow_liquid_type'] = liquid_type
                 liquid_obj.location = (0, 0, 0)
                 liquid_objects_created += 1
             else:
@@ -1754,7 +1773,80 @@ def createBlendedTerrain(materialName, textureLocation, layers, baseDir, extensi
         print(e)
         bpy.data.materials.remove(material)
 
-def importWoWOBJ(objectFile, givenParent = None, settings = None):
+def importWoWOBJ(objectFile, givenParent=None, settings=None):
+    """Synchronous entry point for scripts; the UI consumes the same iterator."""
+    iterator = iter_import(objectFile, givenParent, settings)
+    while True:
+        try:
+            next(iterator)
+        except StopIteration as done:
+            return done.value
+
+
+def _copy_placement(original, settings):
+    if not getattr(settings, 'navigationOnly', False):
+        return original.copy()
+    # Share geometry without copying render and animation state.
+    obj = new_object(settings, original.get('wow_import_label', original.name), original.data)
+    obj.location = original.location
+    obj.rotation_euler = original.rotation_euler
+    obj.scale = original.scale
+    for key in ('wow_export_source', 'wow_nav_area', 'wow_liquid_type'):
+        if key in original:
+            obj[key] = original[key]
+    return obj
+
+
+def _model_key(path, settings):
+    cache = getattr(settings, '_path_keys', None)
+    if cache is None:
+        settings._path_keys = cache = {}
+    lexical = os.path.normcase(os.path.abspath(path))
+    canonical = cache.get(lexical)
+    if canonical is None:
+        canonical = os.path.normcase(os.path.realpath(lexical))
+        cache[lexical] = canonical
+    return canonical
+
+
+def iter_import(objectFile, givenParent=None, settings=None):
+    if settings is None:
+        from . import Settings
+        settings = Settings()
+    path = _model_key(objectFile, settings)
+    active = getattr(settings, '_active_paths', None)
+    if active is None:
+        settings._active_paths = active = set()
+        settings._models = {}
+        settings._model_ids = set(bpy.context.scene.get('importedModelIDs', []))
+    if path in active:
+        raise ValueError(f'Cyclic model placement: {objectFile}')
+    active.add(path)
+    try:
+        obj = yield from _importWoWOBJ(objectFile, givenParent, settings)
+        settings._models[path] = obj
+        return obj
+    finally:
+        active.remove(path)
+
+
+def _child_import(path, parent, settings, start, end):
+    progress = getattr(settings, '_progress', None)
+    if progress:
+        settings._progress = lambda value, text: progress(start + (end-start)*value/100, text)
+    try:
+        return (yield from iter_import(path, parent, settings))
+    finally:
+        settings._progress = progress
+
+
+def _importWoWOBJ(objectFile, givenParent=None, settings=None):
+    navigation_only = getattr(settings, 'navigationOnly', False)
+    native = None
+    if navigation_only:
+        from . import native_geometry
+        if native_geometry.available():
+            native = native_geometry
     baseDir, fileName = os.path.split(objectFile)
 
     print('Parsing OBJ: ' + fileName)
@@ -1762,7 +1854,6 @@ def importWoWOBJ(objectFile, givenParent = None, settings = None):
     material_libs = set()
     mtlfile = ''
     verts = []
-    normals = []
     uvs = []
     vertex_colors = []
     meshes = []
@@ -1774,121 +1865,175 @@ def importWoWOBJ(objectFile, givenParent = None, settings = None):
             self.name = ''
             self.verts = set()
             self.faces = []
+            self.uv_faces = []
 
     json_info = {}
-    try:
-        with open(os.path.join(baseDir, fileName[:fileName.rfind('.')] + '.json')) as fp:
-            json_info = json.load(fp)
-            if json_info.get('fileType') == 'm2':
-                # Create mapping from skin section index to texture unit
-                json_info['skinTexUnits'] = {i['skinSectionIndex']: i for i in json_info['skin']['textureUnits']}
-                # Create mapping from mesh name to skin section index for proper lookup
-                json_info['meshToSkinSection'] = {}
-                # Extract texture transform data for animation
-                json_info['textureTransforms'] = json_info.get('textureTransforms', [])
-                json_info['textureTransformsLookup'] = json_info.get('textureTransformsLookup', [])
-            elif json_info.get('fileType') == 'wmo':
-                json_info['mtlTextureIds'] = {i['fileDataID']: i['mtlName'] for i in json_info['textures']}
-
-                # texture file path lookup by fileDataID
-                json_info['texturePathsByFDID'] = {
-                    t['fileDataID']: t.get('fileNameExternal', '')
-                    for t in json_info.get('textures', [])
-                    if t.get('fileNameExternal')
-                }
-
-                # material index lookup by MTL name
-                json_info['mtlIndexes'] = {}
-                for idx, data in enumerate(json_info.get('materials', [])):
-                    # shader 23 (pixelShader 20) uses texture2 as the MTL material
-                    if data.get('shader') == 23:
-                        tex_id = data.get('texture2', 0)
-                    else:
-                        tex_id = data.get('texture1', 0)
-
-                    if tex_id in json_info['mtlTextureIds']:
-                        mtl_name = json_info['mtlTextureIds'][tex_id]
-                        if mtl_name not in json_info['mtlIndexes']:
-                            json_info['mtlIndexes'][mtl_name] = idx
-    except:
-        pass
-
-    curMesh = OBJMesh()
-    matBlendModes = defaultdict(list)
-    meshIndex = -1
-    with open(objectFile, 'rb') as f:
-        for line in f:
-            line_split = line.split()
-            if not line_split:
-                continue
-            line_start = line_split[0]
-            if line_start == b'mtllib':
-                mtlfile = line_split[1]
-            elif line_start == b'v':
-                verts.append([float(v) for v in line_split[1:]])
-            elif line_start == b'vn':
-                normals.append([float(v) for v in line_split[1:]])
-            elif line_start == b'vc':
-                vertex_colors.append([float(v) for v in line_split[1:]])
-            elif line_start.startswith(b'vt'):
-                layer_index = 0
-
-                if len(line_start) > 2:
-                    line_str = line_start.decode('utf8')
-                    layer_index = int(line_str[-1]) - 1
-
-                if len(uvs) <= layer_index:
-                    uvs.append([])
-
-                uvs[layer_index].append([float(v) for v in line_split[1:]])
-            elif line_start == b'f':
-                line_split = line_split[1:]
-                fv = [int(v.split(b'/')[0]) for v in line_split]
-                meshes[meshIndex].faces.append((fv[0], fv[1], fv[2]))
-                meshes[meshIndex].verts.update([i - 1 for i in fv])
-            elif line_start == b'g':
-                meshIndex += 1
-                meshes.append(OBJMesh())
-                meshes[meshIndex].name = line_split[1].decode('utf-8')
-                # Extract skin section index from mesh name for M2 files
+    if not navigation_only:
+        try:
+            with open(os.path.join(baseDir, fileName[:fileName.rfind('.')] + '.json')) as fp:
+                json_info = json.load(fp)
                 if json_info.get('fileType') == 'm2':
-                    mesh_name = meshes[meshIndex].name
-                    # Mesh names are typically like 'Geoset_000', extract the number
-                    try:
-                        skin_section_idx = int(mesh_name.split('_')[-1])
-                        json_info['meshToSkinSection'][meshIndex] = skin_section_idx
-                    except (ValueError, IndexError):
-                        # Fallback: use mesh index if name parsing fails
-                        json_info['meshToSkinSection'][meshIndex] = meshIndex
-            elif line_start == b'usemtl':
-                materialName = normalizeName(line_split[1].decode('utf-8'))
+                    # Create mapping from skin section index to texture unit
+                    json_info['skinTexUnits'] = {i['skinSectionIndex']: i for i in json_info['skin']['textureUnits']}
+                    # Create mapping from mesh name to skin section index for proper lookup
+                    json_info['meshToSkinSection'] = {}
+                    # Extract texture transform data for animation
+                    json_info['textureTransforms'] = json_info.get('textureTransforms', [])
+                    json_info['textureTransformsLookup'] = json_info.get('textureTransformsLookup', [])
+                elif json_info.get('fileType') == 'wmo':
+                    json_info['mtlTextureIds'] = {i['fileDataID']: i['mtlName'] for i in json_info['textures']}
 
-                if settings.useAlpha:
-                    blendingMode = None
+                    # texture file path lookup by fileDataID
+                    json_info['texturePathsByFDID'] = {
+                        t['fileDataID']: t.get('fileNameExternal', '')
+                        for t in json_info.get('textures', [])
+                        if t.get('fileNameExternal')
+                    }
 
+                    # material index lookup by MTL name
+                    json_info['mtlIndexes'] = {}
+                    for idx, data in enumerate(json_info.get('materials', [])):
+                        # shader 23 (pixelShader 20) uses texture2 as the MTL material
+                        if data.get('shader') == 23:
+                            tex_id = data.get('texture2', 0)
+                        else:
+                            tex_id = data.get('texture1', 0)
+
+                        if tex_id in json_info['mtlTextureIds']:
+                            mtl_name = json_info['mtlTextureIds'][tex_id]
+                            if mtl_name not in json_info['mtlIndexes']:
+                                json_info['mtlIndexes'][mtl_name] = idx
+        except:
+            pass
+
+        matBlendModes = defaultdict(list)
+    meshes.append(OBJMesh())
+    meshes[0].name = 'Default'
+    meshIndex = 0
+    progress = getattr(settings, '_progress', None)
+    file_size = os.path.getsize(objectFile)
+    next_progress = 0.0
+    bytes_read = 0
+    if native is None:
+        with open(objectFile, 'rb') as f:
+            for line_number, line in enumerate(f, 1):
+                bytes_read += len(line)
+                if line_number % 4096 == 0:
+                    yield
+                if progress and file_size:
+                    fraction = min(bytes_read / file_size, 1.0)
+                    if fraction >= next_progress:
+                        progress(5.0 + fraction * 20.0, f'Parsing {fileName}')
+                        next_progress = fraction + 0.02
+                line_split = line.split()
+                if not line_split:
+                    continue
+                line_start = line_split[0]
+                if navigation_only and (line_start in (b'vn', b'vc', b'usemtl') or line_start.startswith(b'vt')):
+                    continue
+                if line_start == b'mtllib':
+                    mtlfile = line_split[1]
+                elif line_start == b'v':
+                    vertex = tuple(float(v) for v in line_split[1:4])
+                    if len(vertex) != 3 or not all(map(isfinite, vertex)):
+                        raise ValueError(f'Invalid vertex on line {line_number}')
+                    verts.append(vertex)
+                elif line_start == b'vn':
+                    pass  # Exported normals are unused; Blender computes smooth normals.
+                elif line_start == b'vc':
+                    vertex_colors.append([float(v) for v in line_split[1:]])
+                elif line_start.startswith(b'vt'):
+                    layer_index = 0
+
+                    if len(line_start) > 2:
+                        line_str = line_start.decode('utf8')
+                        layer_index = int(line_str[2:]) - 1
+                    if not 0 <= layer_index < 8:
+                        raise ValueError(f'Unsupported UV layer on line {line_number}')
+
+                    while len(uvs) <= layer_index:
+                        uvs.append([])
+
+                    uv = tuple(float(v) for v in line_split[1:3])
+                    if len(uv) != 2 or not all(map(isfinite, uv)):
+                        raise ValueError(f'Invalid UV on line {line_number}')
+                    uvs[layer_index].append(uv)
+                elif line_start == b'f':
+                    line_split = line_split[1:]
+                    if meshIndex < 0 or len(line_split) < 3:
+                        continue
+                    fv = []
+                    ft = []
+                    for token in line_split:
+                        parts = token.split(b'/')
+                        index = int(parts[0])
+                        if not index:
+                            raise ValueError(f'Zero OBJ vertex index on line {line_number}')
+                        # OBJ indices are one-based; negative values are relative to
+                        # the number of vertices defined at this point in the file.
+                        vi = index - 1 if index > 0 else len(verts) + index
+                        if not 0 <= vi < len(verts):
+                            raise ValueError(f'OBJ vertex index out of range on line {line_number}')
+                        fv.append(vi)
+                        if navigation_only:
+                            continue
+                        ti = int(parts[1]) if len(parts) > 1 and parts[1] else None
+                        if ti == 0:
+                            raise ValueError(f'Zero OBJ UV index on line {line_number}')
+                        ft.append((ti-1 if ti > 0 else len(uvs[0])+ti) if ti is not None and uvs else vi)
+                    for corner in range(1, len(fv) - 1):
+                        triangle = (fv[0], fv[corner], fv[corner + 1])
+                        meshes[meshIndex].faces.append(triangle)
+                        if not navigation_only:
+                            meshes[meshIndex].uv_faces.append((ft[0],ft[corner],ft[corner+1]))
+                    if settings.createVertexGroups:
+                        meshes[meshIndex].verts.update(fv)
+                elif line_start == b'g':
+                    if meshes[meshIndex].faces or meshes[meshIndex].name != 'Default':
+                        meshIndex += 1
+                        meshes.append(OBJMesh())
+                    meshes[meshIndex].name = b' '.join(line_split[1:]).decode('utf-8') or 'Default'
+                    # Extract skin section index from mesh name for M2 files
                     if json_info.get('fileType') == 'm2':
-                        blendingMode = json_info['materials'][json_info['skinTexUnits'][meshIndex]['materialIndex']]['blendingMode']
-                    elif json_info.get('fileType') == 'wmo':
+                        mesh_name = meshes[meshIndex].name
+                        # Mesh names are typically like 'Geoset_000', extract the number
                         try:
-                            blendingMode = json_info['materials'][json_info['mtlIndexes'][materialName]]['blendMode']
-                        except KeyError:
-                            print('error getting material blending mode for %s' % materialName)
+                            skin_section_idx = int(mesh_name.split('_')[-1])
+                            json_info['meshToSkinSection'][meshIndex] = skin_section_idx
+                        except (ValueError, IndexError):
+                            # Fallback: use mesh index if name parsing fails
+                            json_info['meshToSkinSection'][meshIndex] = meshIndex
+                elif line_start == b'usemtl':
+                    materialName = normalizeName(line_split[1].decode('utf-8'))
 
-                    if blendingMode is not None:
-                        matBlendModes[materialName].append(blendingMode)
-                        # use texture with specific blending mode
-                        materialName += '_B' + str(blendingMode)
+                    if settings.useAlpha:
+                        blendingMode = None
 
-                meshes[meshIndex].usemtl = materialName
+                        if json_info.get('fileType') == 'm2':
+                            blendingMode = json_info['materials'][json_info['skinTexUnits'][meshIndex]['materialIndex']]['blendingMode']
+                        elif json_info.get('fileType') == 'wmo':
+                            try:
+                                blendingMode = json_info['materials'][json_info['mtlIndexes'][materialName]]['blendMode']
+                            except KeyError:
+                                print('error getting material blending mode for %s' % materialName)
+
+                        if blendingMode is not None:
+                            matBlendModes[materialName].append(blendingMode)
+                            # use texture with specific blending mode
+                            materialName += '_B' + str(blendingMode)
+
+                    meshes[meshIndex].usemtl = materialName
 
     # Defaults to master collection if no collection exists.
-    collection = bpy.context.view_layer.active_layer_collection.collection.objects
+    collection = getattr(settings, '_collection', None)
+    if collection is None:
+        collection = bpy.context.view_layer.active_layer_collection.collection.objects
 
     ## Materials file (.mtl)
     materials = dict()
     matname = ''
     matfile = ''
-    if mtlfile != '':
+    if mtlfile != '' and settings.importTextures:
         with open(os.path.join(baseDir, mtlfile.decode('utf-8') ), 'r') as f:
             for line in f:
                 line_split = line.split()
@@ -1902,22 +2047,14 @@ def importWoWOBJ(objectFile, givenParent = None, settings = None):
                     matfile = line_split[1]
                     materials[matname] = os.path.join(baseDir, matfile)
 
-    if bpy.ops.object.select_all.poll():
-        bpy.ops.object.select_all(action='DESELECT')
+    yield  # Give Blender time to draw before allocating geometry.
 
 
-    # TODO: Better handling for dupes?
     objname = os.path.basename(objectFile)
 
-    if objname in bpy.data.objects:
-        objindex = 1
-        newname = objname
-        while(newname in bpy.data.objects):
-            newname = objname + '.' + str(objindex).rjust(3, '0')
-            objindex += 1
-
-    newmesh = bpy.data.meshes.new(objname)
-    obj = bpy.data.objects.new(objname, newmesh)
+    newmesh = new_mesh(settings, objname)
+    obj = new_object(settings, objname, newmesh)
+    obj['wow_export_source'] = os.path.realpath(objectFile)
 
     # Create a new material instance for each material entry.
     if settings.importTextures:
@@ -1929,7 +2066,10 @@ def importWoWOBJ(objectFile, givenParent = None, settings = None):
         if terrainFile:
             textureExtensionMode = detectTextureMode(materials)
 
-        for materialName, textureLocation in materials.items():
+        for material_number, (materialName, textureLocation) in enumerate(materials.items()):
+            if progress:
+                progress(25 + 10*material_number/max(len(materials),1), f'Materials {fileName}')
+            yield
             material = bpy.data.materials.get(materialName)
             materialB = {}
             for bm in matBlendModes[materialName]:
@@ -2018,65 +2158,65 @@ def importWoWOBJ(objectFile, givenParent = None, settings = None):
                 if materialBName in usedMaterials:
                     obj.data.materials.append(materialBMat)
 
-    ## Meshes
-    bm = bmesh.new()
-
-    i = 0
-    for v in verts:
-        vert = bm.verts.new(v)
-        vert.normal = normals[i]
-        i = i + 1
-
-    bm.verts.ensure_lookup_table()
-    bm.verts.index_update()
-
-    for mesh in meshes:
-        exampleFaceSet = False
-        for face in mesh.faces:
-            try:
-                ## TODO: Must be a better way to do this, this is already much faster than doing material every face, but still.
-                if exampleFaceSet == False:
-                    bm.faces.new((
-                        bm.verts[face[0] - 1],
-                        bm.verts[face[1] - 1],
-                        bm.verts[face[2] - 1]
-                    ))
-                    bm.faces.ensure_lookup_table()
-
-                    if mesh.usemtl:
-                        bm.faces[-1].material_index = obj.data.materials.find(mesh.usemtl)
-
-                    bm.faces[-1].smooth = True
-                    exampleFace = bm.faces[-1]
-                    exampleFaceSet = True
-                else:
-                    ## Use example face if set to speed up material copy!
-                    bm.faces.new((
-                        bm.verts[face[0] - 1],
-                        bm.verts[face[1] - 1],
-                        bm.verts[face[2] - 1]
-                    ), exampleFace)
-            except ValueError:
-                ## TODO: Duplicate faces happen for some reason
-                pass
-
-    for layer_index, layer in enumerate(uvs):
-        uv_name = layer_index > 0 and ('UV' + str(layer_index + 1) + 'Map') or 'UVMap'
-        uv_layer = bm.loops.layers.uv.new(uv_name)
-
-        for face in bm.faces:
-            for loop in face.loops:
-                loop[uv_layer].uv = layer[loop.vert.index]
-
-    bm.to_mesh(newmesh)
-    bm.free()
-
-    # import vertex colors as color attribute for WMO shader 20 blend weights
-    if vertex_colors:
-        color_layer = newmesh.color_attributes.new(name='wmo_colors2', type='FLOAT_COLOR', domain='POINT')
-        for i, color in enumerate(vertex_colors):
-            if i < len(color_layer.data):
-                color_layer.data[i].color = color if len(color) >= 4 else [*color, 1.0]
+    if native is not None:
+        if progress:
+            progress(36, f'Building geometry {fileName}')
+        yield
+        native.populate(newmesh, objectFile)
+        if progress:
+            progress(55, f'Placements {fileName}')
+        yield
+    else:
+        # Bulk RNA writes avoid millions of Python -> Blender property assignments.
+        faces = list(chain.from_iterable(mesh.faces for mesh in meshes))
+        uv_faces = list(chain.from_iterable(mesh.uv_faces for mesh in meshes))
+        face_materials = array('i')
+        for mesh in meshes:
+            material_index = max(obj.data.materials.find(mesh.usemtl), 0) if mesh.usemtl else 0
+            face_materials.extend([material_index] * len(mesh.faces))
+        if progress:
+            progress(36, f'Building mesh {fileName}')
+        yield
+        newmesh.from_pydata(verts, [], faces)
+        newmesh.polygons.foreach_set('material_index', face_materials)
+        newmesh.polygons.foreach_set('use_smooth', [True] * len(faces))
+        if progress:
+            progress(43, f'Applying UVs {fileName}')
+        yield
+        for layer_index, layer in enumerate(uvs):
+            if not layer:
+                continue
+            uv_name = 'UVMap' if layer_index == 0 else f'UV{layer_index + 1}Map'
+            uv_layer = newmesh.uv_layers.new(name=uv_name, do_init=False)
+            coordinates = array('f')
+            for face_number, face in enumerate(uv_faces):
+                if face_number % 8192 == 0:
+                    yield
+                for index in face:
+                    if not 0 <= index < len(layer):
+                        raise ValueError(f'UV index out of range in {fileName}, layer {layer_index+1}')
+                    coordinates.extend(layer[index])
+            uv_layer.data.foreach_set('uv', coordinates)
+        if vertex_colors:
+            color_layer = newmesh.color_attributes.new(name='wmo_colors2', type='FLOAT_COLOR', domain='POINT')
+            colors = array('f')
+            for i in range(len(verts)):
+                color = vertex_colors[i] if i < len(vertex_colors) else (1, 1, 1, 1)
+                if len(color) not in (3, 4) or not all(map(isfinite, color)):
+                    raise ValueError(f'Invalid vertex color in {fileName}')
+                colors.extend(color if len(color) == 4 else (*color, 1))
+                if i % 8192 == 0:
+                    yield
+            color_layer.data.foreach_set('color', colors)
+        newmesh.update()
+        # Release parsing buffers before recursively loading placement models.
+        del faces, uv_faces, face_materials, verts, uvs, vertex_colors
+        for mesh in meshes:
+            mesh.faces.clear()
+            mesh.uv_faces.clear()
+        if progress:
+            progress(55, f'Placements {fileName}')
+        yield
 
     # needed to have a mesh before we can create vertex groups, so do that now
     if settings.createVertexGroups:
@@ -2089,7 +2229,7 @@ def importWoWOBJ(objectFile, givenParent = None, settings = None):
     obj.rotation_euler.x = radians(90)
 
     collection.link(obj)
-    obj.select_set(True)
+    # Selection is updated once by the outer operator, not for every placement.
 
 
     ## Import liquids
@@ -2101,46 +2241,53 @@ def importWoWOBJ(objectFile, givenParent = None, settings = None):
         print(f'Checking for liquid file: {liquidPath}')
         if os.path.exists(liquidPath):
             print(f'Liquid file found! Importing liquid data from {liquidPath}')
-            importLiquidChunks(liquidPath, obj, settings)
+            yield from _iter_liquids(liquidPath, obj, settings)
         else:
             print(f'No liquid file found at {liquidPath}')
 
     ## Import doodads and/or WMOs
-    csvPath = objectFile.replace('.obj', '_ModelPlacementInformation.csv')
+    csvPath = os.path.splitext(objectFile)[0] + '_ModelPlacementInformation.csv'
     use_csv = settings.importWMO or settings.importM2 or settings.importWMOSets or settings.importGOBJ
 
     if use_csv and os.path.exists(csvPath):
         placementStats = _new_placement_stats(fileName)
         print(f"[WoWOBJ][{fileName}] Importing placement CSV: {csvPath}")
 
-        with open(csvPath, newline='', encoding='utf-8') as csvFile:
+        with open(csvPath, encoding='utf-8-sig') as count_file:
+            row_count = max(sum(1 for _ in count_file)-1, 1)
+        with open(csvPath, newline='', encoding='utf-8-sig') as csvFile:
             reader = csv.DictReader(csvFile, delimiter=';')
+            if not reader.fieldnames or 'ModelFile' not in reader.fieldnames:
+                raise ValueError(f'Invalid placement CSV header: {csvPath}')
             if 'Type' in reader.fieldnames:
                 importType = 'ADT'
 
                 wmoparent = None
                 if settings.importWMO:
-                    wmoparent = bpy.data.objects.new('WMOs', None)
+                    wmoparent = new_object(settings, 'WMOs', None)
                     wmoparent.parent = obj
-                    wmoparent.name = 'WMOs'
+                    if not navigation_only:
+                        wmoparent.name = 'WMOs'
                     wmoparent.rotation_euler = [0, 0, 0]
                     wmoparent.rotation_euler.x = radians(-90)
                     collection.link(wmoparent)
 
                 doodadparent = None
                 if settings.importM2:
-                    doodadparent = bpy.data.objects.new('Doodads', None)
+                    doodadparent = new_object(settings, 'Doodads', None)
                     doodadparent.parent = obj
-                    doodadparent.name = 'Doodads'
+                    if not navigation_only:
+                        doodadparent.name = 'Doodads'
                     doodadparent.rotation_euler = [0, 0, 0]
                     doodadparent.rotation_euler.x = radians(-90)
                     collection.link(doodadparent)
 
                 gobjparent = None
                 if settings.importGOBJ:
-                    gobjparent = bpy.data.objects.new('GameObjects', None)
+                    gobjparent = new_object(settings, 'GameObjects', None)
                     gobjparent.parent = obj
-                    gobjparent.name = 'GameObjects'
+                    if not navigation_only:
+                        gobjparent.name = 'GameObjects'
                     gobjparent.rotation_euler = [0, 0, 0]
                     gobjparent.rotation_euler.x = radians(-90)
                     collection.link(gobjparent)
@@ -2149,14 +2296,20 @@ def importWoWOBJ(objectFile, givenParent = None, settings = None):
                 if not givenParent:
                     print('WMO import without given parent, creating..')
                     if settings.importWMOSets:
-                        givenParent = bpy.data.objects.new('WMO parent', None)
+                        givenParent = new_object(settings, 'WMO parent', None)
                         givenParent.parent = obj
-                        givenParent.name = 'Doodads'
+                        if not navigation_only:
+                            givenParent.name = 'Doodads'
                         givenParent.rotation_euler = [0, 0, 0]
                         givenParent.rotation_euler.x = radians(-90)
                         collection.link(givenParent)
 
             for rowIndex, row in enumerate(reader, start=2):
+                row_start = 55 + 44*(rowIndex-2)/row_count
+                row_end = min(99, 55 + 44*(rowIndex-1)/row_count)
+                if progress:
+                    progress(row_start, f'Placements {fileName}: {rowIndex-1}/{row_count}')
+                yield
                 placementStats['rows_total'] += 1
 
                 if importType == 'ADT':
@@ -2170,17 +2323,13 @@ def importWoWOBJ(objectFile, givenParent = None, settings = None):
                     else:
                         placementStats['rows_other'] += 1
 
-                    tempModelIDList = bpy.context.scene.get('importedModelIDs', [])
+                    tempModelIDList = settings._model_ids
                     modelID = row.get('ModelId')
                     if modelID:
                         if modelID in tempModelIDList and not settings.allowDuplicates:
                             placementStats['skipped_duplicates'] += 1
-                            print('Skipping already imported model ' + modelID)
                             continue
 
-                        if modelID not in tempModelIDList:
-                            tempModelIDList.append(modelID)
-                            bpy.context.scene['importedModelIDs'] = tempModelIDList
 
                     modelFile = row.get('ModelFile', '')
                     modelName = os.path.basename(modelFile)
@@ -2192,10 +2341,9 @@ def importWoWOBJ(objectFile, givenParent = None, settings = None):
                                 placementStats['skipped_disabled_or_unknown'] += 1
                                 continue
 
-                            print('ADT WMO import: ' + modelFile)
 
                             # Make WMO parent that holds WMO and doodads
-                            parent = bpy.data.objects.new(modelName + ' parent', None)
+                            parent = new_object(settings, modelName + ' parent', None)
                             parent.parent = wmoparent
                             parent.location = (MAX_SIZE - float(row['PositionX']), (MAX_SIZE - float(row['PositionZ'])) * -1, float(row['PositionY']))
                             parent.rotation_euler = [0, 0, 0]
@@ -2209,13 +2357,13 @@ def importWoWOBJ(objectFile, givenParent = None, settings = None):
                             collection.link(parent)
 
                             ## Only import OBJ if model is not yet in scene, otherwise copy existing
-                            if modelName not in bpy.data.objects:
+                            if _model_key(modelPath, settings) not in settings._models:
                                 if not os.path.exists(modelPath):
                                     placementStats['missing_files'] += 1
                                     bpy.data.objects.remove(parent, do_unlink=True)
                                     _log_placement_issue(placementStats, f"[WoWOBJ][{fileName}] Missing WMO model (line {rowIndex}): {modelPath}")
                                     continue
-                                importedFile = importWoWOBJ(modelPath, parent, settings)
+                                importedFile = (yield from _child_import(modelPath, parent, settings, row_start, row_end))
                             else:
                                 ## Don't copy WMOs with doodads!
                                 modelPlacementPath = os.path.splitext(modelPath)[0] + '_ModelPlacementInformation.csv'
@@ -2225,32 +2373,31 @@ def importWoWOBJ(objectFile, givenParent = None, settings = None):
                                         bpy.data.objects.remove(parent, do_unlink=True)
                                         _log_placement_issue(placementStats, f"[WoWOBJ][{fileName}] Missing WMO model with placements (line {rowIndex}): {modelPath}")
                                         continue
-                                    importedFile = importWoWOBJ(modelPath, parent, settings)
+                                    importedFile = (yield from _child_import(modelPath, parent, settings, row_start, row_end))
                                 else:
-                                    originalObject = bpy.data.objects[modelName]
-                                    importedFile = originalObject.copy()
-                                    importedFile.data = originalObject.data.copy()
+                                    originalObject = settings._models[_model_key(modelPath, settings)]
+                                    importedFile = _copy_placement(originalObject, settings)
                                     collection.link(importedFile)
 
                             importedFile.parent = parent
+                            if modelID: tempModelIDList.add(modelID)
                             placementStats['imported_wmo'] += 1
                         elif rowType == 'm2':
                             if not settings.importM2:
                                 placementStats['skipped_disabled_or_unknown'] += 1
                                 continue
 
-                            print('ADT M2 import: ' + modelFile)
 
                             ## Only import OBJ if model is not yet in scene, otherwise copy existing
-                            if modelName not in bpy.data.objects:
+                            if _model_key(modelPath, settings) not in settings._models:
                                 if not os.path.exists(modelPath):
                                     placementStats['missing_files'] += 1
                                     _log_placement_issue(placementStats, f"[WoWOBJ][{fileName}] Missing M2 model (line {rowIndex}): {modelPath}")
                                     continue
-                                importedFile = importWoWOBJ(modelPath, None, settings)
+                                importedFile = (yield from _child_import(modelPath, None, settings, row_start, row_end))
                             else:
-                                originalObject = bpy.data.objects[modelName]
-                                importedFile = originalObject.copy()
+                                originalObject = settings._models[_model_key(modelPath, settings)]
+                                importedFile = _copy_placement(originalObject, settings)
                                 importedFile.rotation_euler = [0, 0, 0]
                                 importedFile.rotation_euler.x = radians(90)
                                 collection.link(importedFile)
@@ -2264,21 +2411,22 @@ def importWoWOBJ(objectFile, givenParent = None, settings = None):
                             importedFile.rotation_euler.z = radians(90 + float(row['RotationY']))
                             if row['ScaleFactor']:
                                 importedFile.scale = (float(row['ScaleFactor']), float(row['ScaleFactor']), float(row['ScaleFactor']))
+                            if modelID: tempModelIDList.add(modelID)
                             placementStats['imported_m2'] += 1
                         elif rowType == 'gobj':
                             if not settings.importGOBJ:
                                 placementStats['skipped_disabled_or_unknown'] += 1
                                 continue
 
-                            if modelName not in bpy.data.objects:
+                            if _model_key(modelPath, settings) not in settings._models:
                                 if not os.path.exists(modelPath):
                                     placementStats['missing_files'] += 1
                                     _log_placement_issue(placementStats, f"[WoWOBJ][{fileName}] Missing GOBJ model (line {rowIndex}): {modelPath}")
                                     continue
-                                importedFile = importWoWOBJ(modelPath, None, settings)
+                                importedFile = (yield from _child_import(modelPath, None, settings, row_start, row_end))
                             else:
-                                originalObject = bpy.data.objects[modelName]
-                                importedFile = originalObject.copy()
+                                originalObject = settings._models[_model_key(modelPath, settings)]
+                                importedFile = _copy_placement(originalObject, settings)
                                 importedFile.rotation_euler = [0, 0, 0]
                                 importedFile.rotation_euler.x = radians(90)
                                 collection.link(importedFile)
@@ -2290,6 +2438,7 @@ def importWoWOBJ(objectFile, givenParent = None, settings = None):
                             importedFile.rotation_euler = rotEul
                             if row['ScaleFactor']:
                                 importedFile.scale = (float(row['ScaleFactor']), float(row['ScaleFactor']), float(row['ScaleFactor']))
+                            if modelID: tempModelIDList.add(modelID)
                             placementStats['imported_gobj'] += 1
                         else:
                             placementStats['skipped_disabled_or_unknown'] += 1
@@ -2299,23 +2448,23 @@ def importWoWOBJ(objectFile, givenParent = None, settings = None):
                             placementStats,
                             f"[WoWOBJ][{fileName}] Failed to import ADT row {rowIndex} ({rowType} {modelFile}): {ex}"
                         )
+                        raise ValueError(f'{fileName}, placement row {rowIndex}: {ex}') from ex
                 elif settings.importWMOSets:
                     # WMO CSV
                     modelFile = row.get('ModelFile', '')
                     modelName = os.path.basename(modelFile)
                     modelPath = os.path.normpath(os.path.join(baseDir, modelFile))
-                    print('WMO M2 import: ' + modelFile)
 
                     try:
-                        if modelName not in bpy.data.objects:
+                        if _model_key(modelPath, settings) not in settings._models:
                             if not os.path.exists(modelPath):
                                 placementStats['missing_files'] += 1
                                 _log_placement_issue(placementStats, f"[WoWOBJ][{fileName}] Missing WMO set model (line {rowIndex}): {modelPath}")
                                 continue
-                            importedFile = importWoWOBJ(modelPath, None, settings)
+                            importedFile = (yield from _child_import(modelPath, None, settings, row_start, row_end))
                         else:
-                            originalObject = bpy.data.objects[modelName]
-                            importedFile = originalObject.copy()
+                            originalObject = settings._models[_model_key(modelPath, settings)]
+                            importedFile = _copy_placement(originalObject, settings)
                             if not settings.createDoodadSetCollections:
                                 collection.link(importedFile)
 
@@ -2334,28 +2483,27 @@ def importWoWOBJ(objectFile, givenParent = None, settings = None):
                             if row['DoodadSet']:
                                 print("Valid DoodadSet found: " + row['DoodadSet'])
                                 collectionName = row['DoodadSet']
-                                collection = bpy.data.collections.get(collectionName)
-
-                                if collection is None:
-                                    print("Collection for " + collectionName + " does not exist. Creating collection..")
-                                    collection = bpy.data.collections.new(collectionName)
-                                    bpy.context.scene.collection.children.link(collection)
-
-                                if collection.name not in bpy.context.scene.collection.children:
-                                    print("Collection " + collectionName + " isn't linked to scene. Linking collection..")
-                                    bpy.context.scene.collection.children.link(collection)
-
-                                if collection:
-                                    print("Valid collection present. Linking " + importedFile.name)
-                                    collection.objects.link(importedFile)
+                                set_collection = bpy.data.collections.get(collectionName)
+                                if set_collection is None:
+                                    set_collection = bpy.data.collections.new(collectionName)
+                                if set_collection.name not in bpy.context.scene.collection.children:
+                                    bpy.context.scene.collection.children.link(set_collection)
+                                if importedFile.name not in set_collection.objects:
+                                    set_collection.objects.link(importedFile)
+                            elif not importedFile.users_collection:
+                                collection.link(importedFile)
                     except Exception as ex:
                         placementStats['failed_rows'] += 1
                         _log_placement_issue(
                             placementStats,
                             f"[WoWOBJ][{fileName}] Failed to import WMO set row {rowIndex} ({modelFile}): {ex}"
                         )
+                        raise ValueError(f'{fileName}, placement row {rowIndex}: {ex}') from ex
 
         _print_placement_summary(placementStats)
+        settings._missing_files = getattr(settings, '_missing_files', 0) + placementStats['missing_files']
     elif use_csv:
         print(f"[WoWOBJ][{fileName}] Placement CSV not found: {csvPath}")
+    if progress:
+        progress(100, f'Imported {fileName}')
     return obj

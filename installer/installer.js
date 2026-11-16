@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import util from 'node:util';
 import zlib from 'node:zlib';
+import crypto from 'node:crypto';
 import readline from 'node:readline';
 import os from 'node:os';
 
@@ -103,7 +104,8 @@ async function create_windows_shortcut(exec_path) {
 		$Shortcut.Save()
 	`;
 
-	const proc = Bun.spawn(['powershell', '-Command', ps_script]);
+	const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+	const proc = Bun.spawn([powershell, '-NoProfile', '-NonInteractive', '-Command', ps_script]);
 	await proc.exited;
 
 	if (proc.exitCode === 0)
@@ -191,12 +193,26 @@ async function extract_data_pak(install_path) {
 		const compressed = data.subarray(entry.ofs, entry.ofs + entry.compSize);
 		const decompressed = await inflate_buffer(compressed);
 
-		await fsp.writeFile(target_path, decompressed);
-		await fsp.chmod(target_path, (entry.permissions ?? 0o644) & 0o7777);
+		// Avoid reopening identical files: Windows may deny replacing files that
+		// are in use, and rewriting unchanged files only makes updates less reliable.
+		let already_current = false;
+		try {
+			const current = await fsp.readFile(target_path);
+			already_current = current.byteLength === entry.size
+				&& crypto.createHash('sha256').update(current).digest('hex') === entry.hash;
+		} catch (error) {
+			if (error.code !== 'ENOENT')
+				throw error;
+		}
+
+		if (!already_current) {
+			await fsp.writeFile(target_path, decompressed);
+			await fsp.chmod(target_path, (entry.permissions ?? 0o644) & 0o7777);
+		}
 
 		extracted++;
 
-		console.log('  [%d/%d] %s', extracted, total, relative_path);
+		console.log('  [%d/%d] %s%s', extracted, total, relative_path, already_current ? ' (unchanged)' : '');
 	}
 
 	console.log('Extracted %d files successfully', extracted);

@@ -49,6 +49,31 @@ bun ./build.js <BUILD1> <BUILD2> ...
 
 **Note**: The build process will automatically download nw.js headers and handle native add-on compilation if any are present in the `node_addons/` directory.
 
+### Visual Studio CMake workspace
+
+Open the repository with **File > Open > Folder** and select `x64-debug` or
+`x64-release`. Install the Visual Studio C++ CMake tools (CMake 3.21+ and Ninja).
+If CMake was previously disabled, set `enableCMake` to `true` in
+`.vs/CMakeWorkspaceSettings.json`, then reopen the folder.
+
+The default build compiles `native_geometry` and copies its DLL beside the
+Blender addon. Close Blender before replacing a helper DLL it has loaded.
+Select `wow_export_app` to run the existing Bun/NW.js application build, which
+also builds the helper. Install the prerequisites above and run `bun install`
+first. The native Node addon pipeline remains in `build/build-native-addons.js`.
+
+From a Visual Studio x64 developer terminal:
+
+```powershell
+cmake --preset x64-release
+cmake --build --preset native-release
+# Or build the full application:
+cmake --build --preset app-release
+```
+
+Use `x64-debug`, `native-debug`, and `app-debug` for development. Build outputs
+and personal Visual Studio settings are ignored by Git.
+
 ## Debugging (Developers Only)
 > **Note**: Debugging is currently only supported on Windows.
 

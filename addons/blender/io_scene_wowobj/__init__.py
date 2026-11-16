@@ -21,7 +21,7 @@
 bl_info = {
     'name': 'Import WoW OBJ files with doodads',
     'author': 'Marlamin, Kruithne',
-    'version': (0, 3, 16),
+    'version': (0, 3, 20),
     'blender': (5, 0, 0),
     'location': 'File > Import-Export > Import WoW Object (.obj)',
     'description': 'Import OBJ files exported by wow.export with WMOs and doodads',
@@ -41,6 +41,9 @@ import os
 import sys
 
 from bpy_extras.io_utils import (ImportHelper, orientation_helper)
+
+from .navigation_export import WOWEXPORT_OT_export_navigation
+from .navigation_import import WOWEXPORT_OT_import_navigation_region
 
 preview_collections = {}
 
@@ -71,8 +74,9 @@ class Settings:
     createDoodadSetCollections = False
     importLiquid = True
     importUVAnimations = True
+    navigationOnly = False
 
-    def __init__(self, useAlpha = True, createVertexGroups = False, allowDuplicates = False, importWMO = True, importWMOSets = True, importM2 = True, importGOBJ = True, importTextures = True, useTerrainBlending = True, createEmissiveMaterials = True, createDoodadSetCollections = False, importLiquid = True, importUVAnimations = True):
+    def __init__(self, useAlpha = True, createVertexGroups = False, allowDuplicates = False, importWMO = True, importWMOSets = True, importM2 = True, importGOBJ = True, importTextures = True, useTerrainBlending = True, createEmissiveMaterials = True, createDoodadSetCollections = False, importLiquid = True, importUVAnimations = True, navigationOnly = False):
         self.useAlpha = useAlpha
         self.createVertexGroups = createVertexGroups
         self.allowDuplicates = allowDuplicates
@@ -86,6 +90,13 @@ class Settings:
         self.createDoodadSetCollections = createDoodadSetCollections
         self.importLiquid = importLiquid
         self.importUVAnimations = importUVAnimations
+        self.navigationOnly = navigationOnly
+        if navigationOnly:
+            self.importTextures = False
+            self.importUVAnimations = False
+            self.createVertexGroups = False
+            self.createDoodadSetCollections = False
+            self.useAlpha = False
 
 class ImportWoWOBJ(bpy.types.Operator, ImportHelper):
     '''Load a Wavefront OBJ File with additional ADT metadata'''
@@ -98,6 +109,8 @@ class ImportWoWOBJ(bpy.types.Operator, ImportHelper):
     files: bpy.props.CollectionProperty(name = 'Files', type= bpy.types.OperatorFileListElement)
     directory: bpy.props.StringProperty(subtype = 'DIR_PATH')
 
+    navigationOnly: bpy.props.BoolProperty(name='Navigation Geometry Only',
+        description='Skip textures, materials, UVs and colors; preserve geometry, placements and liquids', default=False)
     importWMO: bpy.props.BoolProperty(name = 'Import WMO', description = 'If exported, WMOs will be imported', default = 1)
     importWMOSets: bpy.props.BoolProperty(name = 'Import WMO Sets', description = 'If exported, WMO sets will be imported', default = 1)
     importM2: bpy.props.BoolProperty(name = 'Import M2', description = 'If exported, M2s will be imported', default = 1)
@@ -126,19 +139,68 @@ class ImportWoWOBJ(bpy.types.Operator, ImportHelper):
             createEmissiveMaterials = self.createEmissiveMaterials,
             createDoodadSetCollections = self.createDoodadSetCollections,
             importLiquid = self.importLiquid,
-            importUVAnimations = self.importUVAnimations
+            importUVAnimations = self.importUVAnimations,
+            navigationOnly = self.navigationOnly
         )
         settings._import_cache_cleared = False
 
         from . import import_wowobj
-        if self.files:
-            for importFile in self.files:
-                import_wowobj.importWoWOBJAddon(os.path.join(self.directory, importFile.name), settings)
-        elif self.filepath:
-            # Backwards compatibility for old API for custom tooling.
-            import_wowobj.importWoWOBJAddon(self.filepath, settings)
+        paths = ([os.path.join(self.directory, item.name) for item in self.files]
+                 if self.files else ([self.filepath] if self.filepath else []))
+        if not paths:
+            self.report({'ERROR'}, 'Choose at least one OBJ file')
+            return {'CANCELLED'}
+        from .import_session import ImportSession
+        try:
+            self._session = ImportSession(context, paths, settings)
+        except Exception as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        # Script/headless calls stay synchronous. File-browser UI imports yield
+        # on a timer so percentage text and cancellation actually work.
+        if bpy.app.background:
+            try:
+                self._session.finish()
+            except Exception as exc:
+                self._session.close(rollback=True)
+                self.report({'ERROR'}, f'WoW OBJ import failed: {exc}')
+                return {'CANCELLED'}
+            self._session.close()
+            return {'FINISHED'}
+        self._timer = context.window_manager.event_timer_add(0.01, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
 
-        return {'FINISHED'}
+    def modal(self, context, event):
+        if event.type == 'ESC':
+            self.cancel(context)
+            self.report({'INFO'}, 'WoW OBJ import cancelled; partial import removed')
+            return {'CANCELLED'}
+        if event.type != 'TIMER':
+            return {'RUNNING_MODAL'}
+        try:
+            if not self._session.step():
+                self._session.close()
+                context.window_manager.event_timer_remove(self._timer)
+                self._timer = None
+                missing = getattr(self._session.settings, '_missing_files', 0)
+                if missing:
+                    self.report({'WARNING'}, f'Import complete (100%); {missing} referenced model files missing. See console for paths.')
+                else:
+                    self.report({'INFO'}, 'WoW OBJ import complete (100%)')
+                return {'FINISHED'}
+        except Exception as exc:
+            self.cancel(context)
+            self.report({'ERROR'}, f'WoW OBJ import failed: {exc}')
+            return {'CANCELLED'}
+        return {'RUNNING_MODAL'}
+
+    def cancel(self, context):
+        if getattr(self, '_session', None):
+            self._session.close(rollback=True)
+        if getattr(self, '_timer', None):
+            context.window_manager.event_timer_remove(self._timer)
+            self._timer = None
 
     def draw(self, context):
         layout = self.layout
@@ -146,6 +208,7 @@ class ImportWoWOBJ(bpy.types.Operator, ImportHelper):
         row = layout.row(align=True)
         box = layout.box()
 
+        box.prop(self, 'navigationOnly')
         box.prop(self, 'importWMO')
         box.prop(self, 'importWMOSets')
         box.prop(self, 'importM2')
@@ -194,6 +257,7 @@ class WOWEXPORT_OT_import_last_export(bpy.types.Operator):
         stl_prefixes = ('M2_STL:', 'M3_STL:', 'WMO_STL:')
 
         imported_count = 0
+        obj_paths = []
 
         try:
             with open(export_file, 'r') as f:
@@ -209,7 +273,7 @@ class WOWEXPORT_OT_import_last_export(bpy.types.Operator):
                         if line.startswith(prefix):
                             file_path = line[len(prefix):]
                             if os.path.exists(file_path):
-                                bpy.ops.import_scene.wowobj(filepath=file_path)
+                                obj_paths.append(file_path)
                                 imported_count += 1
                             else:
                                 self.report({'WARNING'}, f'File not found: {file_path}')
@@ -245,6 +309,11 @@ class WOWEXPORT_OT_import_last_export(bpy.types.Operator):
                                 self.report({'WARNING'}, f'File not found: {file_path}')
                             break
 
+            if obj_paths:
+                # Start one batch, never several concurrent modal imports.
+                result = bpy.ops.import_scene.wowobj(directory='', files=[{'name': p} for p in obj_paths])
+                return {'CANCELLED'} if result == {'CANCELLED'} else {'FINISHED'}
+
             if imported_count > 0:
                 self.report({'INFO'}, f'Imported {imported_count} object(s)')
             else:
@@ -277,9 +346,13 @@ class WOWEXPORT_PT_sidebar_panel(bpy.types.Panel):
 
         layout.operator('wowexport.import_dialog')
         layout.operator('wowexport.import_last_export')
+        layout.operator('wowexport.import_navigation_region')
+        layout.operator('wowexport.export_navigation')
 
 
 classes = (
+    WOWEXPORT_OT_import_navigation_region,
+    WOWEXPORT_OT_export_navigation,
     ImportWoWOBJ,
     WOWEXPORT_OT_import_dialog,
     WOWEXPORT_OT_import_last_export,
@@ -288,6 +361,8 @@ classes = (
 
 
 def register():
+    from .view_settings import hide_relationship_lines
+    hide_relationship_lines()
     from bpy.utils import register_class
     for cls in classes:
         register_class(cls)

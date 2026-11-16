@@ -116,9 +116,11 @@ async function is_file_locked(file) {
 		// To that end, send an OS specific termination command.
 		let command = [];
 		switch (process.platform) {
-			case 'win32':
-				command = ['taskkill', '/f', '/im', 'wow.export.exe'];
+			case 'win32': {
+				const systemRoot = process.env.SystemRoot || 'C:\\Windows';
+				command = [path.join(systemRoot, 'System32', 'taskkill.exe'), '/f', '/im', 'wow.export.exe'];
 				break;
+			}
 			default: // linux, darwin
 				command = ['pkill', '-f', 'wow.export'];
 				break;

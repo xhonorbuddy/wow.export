@@ -8,6 +8,14 @@
 # IDE configuration.
 /.vscode
 /.idea
+/.vs
+/out
+/tmp
+/CMakeUserPresets.json
+
+# Generated Blender addon artifacts (rebuild from sources).
+/addons/blender/io_scene_wowobj.zip
+/addons/blender/io_scene_wowobj/native_geometry.dll
 
 # Runtime directory for tests.
 /tests/user_data
